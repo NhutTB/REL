@@ -124,7 +124,7 @@ def make_env(rank, seed=0):
 # ========== HUẤN LUYỆN ========== #
 if __name__ == "__main__":
     ALGO = "PPO"  # Chọn: PPO / SAC / TD3
-    TOTAL_TIMESTEPS = 1_000_000
+    TOTAL_TIMESTEPS = 5_000_000
     NUM_ENVS = 16  # Tăng số môi trường song song để thu thập dữ liệu nhanh hơn
     RUN_NAME = f"{ALGO}_{int(time.time())}"
 
@@ -181,7 +181,7 @@ if __name__ == "__main__":
             tensorboard_log=f"runs/{run.id}",
             device="cuda" if torch.cuda.is_available() else "cpu",
             n_steps=2048,
-            batch_size=512,  # Tăng batch size để tận dụng GPU tốt hơn
+            batch_size=1024,  # Tăng batch size để tận dụng GPU tốt hơn
             n_epochs=10,     # Bắt GPU học nhiều hơn trên mỗi lô dữ liệu
             gamma=0.99,
             gae_lambda=0.95,
