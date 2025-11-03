@@ -1,36 +1,28 @@
-# Training.py
 import os
 import time
 import wandb
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO, SAC, TD3
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.utils import set_random_seed
 from wandb.integration.sb3 import WandbCallback
 from stable_baselines3.common.vec_env import VecNormalize
-
 import torch
-# Import môi trường
+import torch.nn as nn
 from Enviroment import DronePursuitEnv
 
-
-# ========== CALLBACK ROLLOUT & VIDEO ========== #
 class RolloutCallback(BaseCallback):
-    """
-    Callback để chạy một lượt rollout (đánh giá) định kỳ,
-    quay video và log lên Wandb.
-    """
-    def __init__(self, eval_freq: int, n_obstacles: int = 4, verbose: int = 1):
+    def __init__(self, eval_freq: int, difficulty: str = "hard", n_obstacles_hard: int = 6, verbose: int = 1):
         super().__init__(verbose)
         self.eval_freq = eval_freq
-        # Tạo một môi trường riêng chỉ để đánh giá và render
-        self.eval_env = DronePursuitEnv(render_mode="rgb_array", n_obstacles=n_obstacles)
+        self.eval_env = DronePursuitEnv(render_mode="rgb_array", 
+                                      difficulty=difficulty, 
+                                      n_obstacles_hard=n_obstacles_hard)
 
     def _on_step(self) -> bool:
-        # Chạy rollout sau mỗi `eval_freq` bước
-        if self.num_timesteps % self.eval_freq == 0:
+        if self.n_calls % self.eval_freq == 0:
             if self.verbose > 0:
                 print(f"\n[RolloutCallback] Running rollout at {self.num_timesteps} timesteps...")
 
@@ -41,20 +33,30 @@ class RolloutCallback(BaseCallback):
             episode_reward = 0
             episode_length = 0
 
+            vec_env = self.model.get_vec_normalize_env()
+            if vec_env is None:
+                eval_obs = obs
+            else:
+                eval_obs = vec_env.normalize_obs(obs)
+
+
             while not (done or truncated):
-                action, _ = self.model.predict(obs, deterministic=True)
+                action, _ = self.model.predict(eval_obs, deterministic=True)
                 obs, reward, done, truncated, info = self.eval_env.step(action)
+                
+                if vec_env is not None:
+                    eval_obs = vec_env.normalize_obs(obs)
+                else:
+                    eval_obs = obs
+
                 episode_reward += reward
                 episode_length += 1
-                # Lấy frame từ môi trường và thêm vào list
                 frame = self.eval_env.render()
                 frames.append(frame)
 
             if self.verbose > 0:
                 print(f"[RolloutCallback] Rollout finished. Reward: {episode_reward:.2f}, Length: {episode_length}")
 
-            # Log video lên Wandb
-            # Chuyển đổi list các frame (T, H, W, C) thành (T, C, H, W) mà wandb yêu cầu
             video_frames = np.array(frames).transpose(0, 3, 1, 2)
             wandb.log({
                 "rollout/video": wandb.Video(video_frames, fps=60, format="mp4"),
@@ -64,18 +66,9 @@ class RolloutCallback(BaseCallback):
                 "rollout/jammed": 1 if info.get("jammed") else 0,
                 "rollout/collision": 1 if info.get("collision") else 0,
             })
-
         return True
 
-# ========== CALLBACK TÙY CHỈNH ========== #
 class EpisodeStatsCallback(BaseCallback):
-    """
-    Callback tùy chỉnh để log thêm số liệu thật:
-    - Tỷ lệ bắt được (capture)
-    - Tỷ lệ va chạm (collision)
-    - Tỷ lệ bị jammed
-    - Tỷ lệ hết giờ (timeout)
-    """
     def __init__(self):
         super().__init__()
         self.episode_count = 0
@@ -87,18 +80,20 @@ class EpisodeStatsCallback(BaseCallback):
     def _on_step(self):
         infos = self.locals.get("infos", [])
         for info in infos:
-            if "captured" in info:
+            if "episode" in info:
                 self.episode_count += 1
-                if info["captured"]:
+                final_info = info.get("final_info", {})
+                
+                if final_info.get("captured"):
                     self.captures += 1
-                elif info["collision"]:
+                elif final_info.get("collision"):
                     self.collisions += 1
-                elif info["jammed"]:
+                elif final_info.get("jammed"):
                     self.jammeds += 1
                 else:
                     self.timeouts += 1
 
-        if self.episode_count > 0 and self.episode_count % 20 == 0:
+        if self.episode_count > 0 and self.episode_count % 50 == 0:
             wandb.log({
                 "stats/capture_rate": self.captures / self.episode_count,
                 "stats/collision_rate": self.collisions / self.episode_count,
@@ -107,28 +102,27 @@ class EpisodeStatsCallback(BaseCallback):
             })
         return True
 
-
-# ========== TẠO MÔI TRƯỜNG ========== #
-def make_env(rank, seed=0):
-    """
-    Hàm tiện ích tạo môi trường song song.
-    """
+def make_env(difficulty="hard", n_obstacles_hard=6, seed=0, rank=0):
     def _init():
-        env = DronePursuitEnv(render_mode=None, n_obstacles=4)
-        env.reset(seed=seed + rank)
+        env = DronePursuitEnv(render_mode=None, 
+                              difficulty=difficulty, 
+                              n_obstacles_hard=n_obstacles_hard)
+        env.reset(seed=seed + rank) 
         return env
     set_random_seed(seed)
     return _init
 
-
-# ========== HUẤN LUYỆN ========== #
 if __name__ == "__main__":
-    ALGO = "PPO"  # Chọn: PPO / SAC / TD3
+    ALGO = "SAC"
     TOTAL_TIMESTEPS = 5_000_000
-    NUM_ENVS = 16  # Tăng số môi trường song song để thu thập dữ liệu nhanh hơn
-    RUN_NAME = f"{ALGO}_{int(time.time())}"
+    
+    DIFFICULTY_TO_TRAIN = "hard"
+    
+    N_OBSTACLES_HARD_MODE = 6
+    NUM_ENVS = 16
 
-    # 1️⃣ Khởi tạo Weights & Biases
+    RUN_NAME = f"{ALGO}_Fast_{DIFFICULTY_TO_TRAIN}_{int(time.time())}"
+
     run = wandb.init(
         project="DronePursuit_Project",
         name=RUN_NAME,
@@ -137,95 +131,69 @@ if __name__ == "__main__":
             "timesteps": TOTAL_TIMESTEPS,
             "num_envs": NUM_ENVS,
             "policy": "MlpPolicy",
+            "difficulty": DIFFICULTY_TO_TRAIN,
         },
         sync_tensorboard=True,
         monitor_gym=True,
         save_code=True,
     )
 
-    # 2️⃣ Tạo môi trường song song
-    print(f"🧠 Đang tạo {NUM_ENVS} môi trường song song...")
+    print(f"Creating {NUM_ENVS} environments (Difficulty: {DIFFICULTY_TO_TRAIN})...")
     env = VecNormalize(
-        SubprocVecEnv([make_env(i) for i in range(NUM_ENVS)]),
-        norm_obs=True,      # Chuẩn hóa observation
-        norm_reward=True,   # Chuẩn hóa reward
-        clip_reward=10.0    # Cắt bớt reward quá lớn (ví dụ: +500)
+        SubprocVecEnv([make_env(difficulty=DIFFICULTY_TO_TRAIN, 
+                                n_obstacles_hard=N_OBSTACLES_HARD_MODE, 
+                                rank=i) for i in range(NUM_ENVS)]),
+        norm_obs=True,
+        norm_reward=True,
+        clip_reward=10.0
     )
 
-    # 3️⃣ Callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(100_000 // NUM_ENVS, 1),
+        save_freq=max(50_000 // NUM_ENVS, 1),
         save_path=f"./models/{RUN_NAME}/",
         name_prefix=f"{ALGO}_drone"
     )
+    wandb_callback = WandbCallback(gradient_save_freq=10000, model_save_path=f"models/wandb/{run.id}", verbose=2)
+    stats_callback = EpisodeStatsCallback()
+    rollout_callback = RolloutCallback(eval_freq=max(50_000 // NUM_ENVS, 1), 
+                                     difficulty=DIFFICULTY_TO_TRAIN,
+                                     n_obstacles_hard=N_OBSTACLES_HARD_MODE)
 
-    wandb_callback = WandbCallback(
-        gradient_save_freq=10000,
-        model_save_path=f"models/wandb/{run.id}",
-        verbose=2,
+    print(f"Initializing {ALGO} model...")
+    policy_kwargs = dict(
+        net_arch=dict(pi=[256, 256], qf=[256, 256]),
+        activation_fn=nn.ReLU
     )
 
-    stats_callback = EpisodeStatsCallback()
+    model = SAC(
+        "MlpPolicy",
+        env,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        tensorboard_log=f"runs/{run.id}",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        
+        buffer_size=1_000_000,
+        batch_size=256,
+        learning_rate=3e-4,
+        gamma=0.99,
+        ent_coef='auto',
+        train_freq=(4096, "step"), 
+        gradient_steps=1024,
+    )
 
-    # Callback mới để chạy rollout và quay video
-    # Sẽ chạy mỗi 50,000 timesteps
-    rollout_callback = RolloutCallback(eval_freq=max(50_000 // NUM_ENVS, 1))
-
-    # 4️⃣ Khởi tạo Model
-    print(f"🚀 Đang khởi tạo mô hình {ALGO} ...")
-    if ALGO == "PPO":
-        model = PPO(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            tensorboard_log=f"runs/{run.id}",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            n_steps=2048,
-            batch_size=1024,  # Tăng batch size để tận dụng GPU tốt hơn
-            n_epochs=10,     # Bắt GPU học nhiều hơn trên mỗi lô dữ liệu
-            gamma=0.99,
-            gae_lambda=0.95,
-            vf_coef=1.0,
-        )
-    elif ALGO == "SAC":
-        model = SAC(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            tensorboard_log=f"runs/{run.id}",
-            device="cuda",
-            buffer_size=300_000,
-            learning_rate=7e-4,
-            batch_size=256,
-            gamma=0.99,
-        )
-    elif ALGO == "TD3":
-        model = TD3(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            tensorboard_log=f"runs/{run.id}",
-            device="cuda",
-            buffer_size=300_000,
-            learning_rate=1e-3,
-            batch_size=128,
-            gamma=0.99,
-        )
-    else:
-        raise ValueError(f"Thuật toán {ALGO} không được hỗ trợ.")
-
-    # 5️⃣ Huấn luyện
-    print(f"🏁 Bắt đầu huấn luyện {ALGO}")
-    print(f"Theo dõi tại: {run.get_url()}")
+    print(f"🏁 Starting training for {ALGO} (Difficulty: {DIFFICULTY_TO_TRAIN})")
+    print(f"Track progress at: {run.url}")
     model.learn(
         total_timesteps=TOTAL_TIMESTEPS,
         callback=[checkpoint_callback, wandb_callback, stats_callback, rollout_callback]
     )
 
-    # 6️⃣ Lưu mô hình cuối
     os.makedirs(f"models/{RUN_NAME}", exist_ok=True)
     model.save(f"models/{RUN_NAME}/final_model.zip")
-    print(f"✅ Đã lưu model cuối cùng tại: models/{RUN_NAME}/final_model.zip")
+    env.save(f"models/{RUN_NAME}/vecnormalize.pkl")
+    print(f"Final model saved at: models/{RUN_NAME}/final_model.zip")
+    print(f"VecNormalize stats saved at: models/{RUN_NAME}/vecnormalize.pkl")
 
     env.close()
     run.finish()
