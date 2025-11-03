@@ -1,81 +1,95 @@
-# Eval.py
-import gymnasium as gym
+import argparse
+import os
 from stable_baselines3 import PPO, SAC, TD3
-import time
 import pygame
-
-# Import môi trường
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from Enviroment import DronePursuitEnv
 
-# --- CẤU HÌNH ĐÁNH GIÁ ---
-# THAY ĐỔI ĐƯỜNG DẪN NÀY
-MODEL_PATH = "models/PPO_1730598835/final_model.zip"
-ALGO = "PPO"  # Phải khớp với model bạn load: PPO, SAC, TD3
-N_EPISODES = 10
-# -----------------------------
+def main():
 
-if __name__ == "__main__":
-    print(f"Đang tải model {ALGO} từ: {MODEL_PATH}")
+    MODEL_PATH = r"D:\REL\model_best\easy_SAC.zip"
 
-    # 1. Tạo môi trường (lần này CÓ RENDER)
-    env = DronePursuitEnv(render_mode="human")
+    parser = argparse.ArgumentParser(description="Evaluate a trained Drone Pursuit agent.")
+    parser.add_argument("--algo", type=str, default="sac", choices=["ppo", "sac", "td3"], help="RL algorithm used for training.")
+    parser.add_argument("--n-episodes", type=int, default=100, help="Number of episodes to run for evaluation.")
+    parser.add_argument("--difficulty", type=str, default="hard", choices=["easy", "medium", "hard"], help="Difficulty level for evaluation.")
+    parser.add_argument("--n-obstacles-hard", type=int, default=6, help="Max number of obstacles for observation space consistency.")
+    args = parser.parse_args()
+
+    print(f"---Starting Fast Agent Evaluation (No Rendering) ---")
+    print(f"Model: {MODEL_PATH}")
+    print(f"Algorithm: {args.algo.upper()}")
+    print(f"Difficulty: {args.difficulty.upper()}")
+    print(f"Episodes: {args.n_episodes}")
+
+    model_dir = os.path.dirname(MODEL_PATH)
+    vecnormalize_path = os.path.join(model_dir, "easy_SAC.pkl")
+    if not os.path.exists(vecnormalize_path):
+        vecnormalize_path = os.path.join(os.path.dirname(model_dir), "medium_SAC.pkl")
+
+    base_env = DummyVecEnv([lambda: DronePursuitEnv(render_mode=None, 
+                                                    difficulty=args.difficulty,
+                                                    n_obstacles_hard=args.n_obstacles_hard)])
     
-    # 2. Load model
-    if ALGO == "PPO":
-        model = PPO.load(MODEL_PATH, env=env)
-    elif ALGO == "SAC":
-        model = SAC.load(MODEL_PATH, env=env)
-    elif ALGO == "TD3":
-        model = TD3.load(MODEL_PATH, env=env)
+    if os.path.exists(vecnormalize_path):
+        print(f"Loading VecNormalize stats from: {vecnormalize_path}")
+        env = VecNormalize.load(vecnormalize_path, base_env)
+        env.training = False
+        env.norm_reward = False
     else:
-        raise ValueError(f"Thuật toán {ALGO} không được hỗ trợ.")
-        
-    print("Model đã tải xong. Bắt đầu đánh giá...")
+        print("VecNormalize file not found. Running without normalization.")
+        env = base_env
     
-    # 3. Chạy vòng lặp đánh giá
+    algo_map = {"ppo": PPO, "sac": SAC, "td3": TD3}
+    model_class = algo_map.get(args.algo.lower())
+    
+    if not model_class:
+        raise ValueError(f"Algorithm {args.algo} is not supported.")
+        
+    print("Loading model...")
+    model = model_class.load(MODEL_PATH, env=env)
+    print("Model loaded successfully. Starting evaluation...")
+        
     total_captures = 0
     total_jams = 0
     total_collisions = 0
     total_timeouts = 0
     
-    for i in range(N_EPISODES):
-        obs, info = env.reset()
+    for i in range(args.n_episodes):
+        obs = env.reset()
         terminated = False
         truncated = False
-        print(f"--- Bắt đầu Lượt #{i+1} ---")
         
         while not (terminated or truncated):
-            # Lấy hành động từ model
             action, _states = model.predict(obs, deterministic=True)
             
-            obs, reward, terminated, truncated, info = env.step(action)
+            obs, reward, done, info_list = env.step(action)
             
-            # Xử lý sự kiện thoát (nhấn nút X)
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    env.close()
-                    exit()
-        
-        # Ghi lại kết quả của lượt
+            terminated = done[0]
+            truncated = info_list[0].get("TimeLimit.truncated", False)
+            info = info_list[0]
         if info.get("captured"):
-            print("Kết quả: BẮT ĐƯỢC MỤC TIÊU (CAPTURED) ✅")
+            print("Result: TARGET CAPTURED")
             total_captures += 1
         elif info.get("jammed"):
-            print("Kết quả: BỊ PHÁ SÓNG (JAMMED) ❌")
+            print("Result: JAMMED")
             total_jams += 1
         elif info.get("collision"):
-            print("Kết quả: VA CHẠM (COLLISION) 💥")
+            print("Result: COLLISION")
             total_collisions += 1
         elif truncated:
-            print("Kết quả: HẾT GIỜ (TIMEOUT) ⏱️")
+            print("Result: TIMEOUT")
             total_timeouts += 1
             
     env.close()
     
-    # 4. In thống kê
-    print("\n--- KẾT QUẢ ĐÁNH GIÁ TỔNG QUAN ---")
-    print(f"Tổng số lượt: {N_EPISODES}")
-    print(f"Tỉ lệ bắt được: {total_captures / N_EPISODES * 100:.1f}%")
-    print(f"Tỉ lệ va chạm: {total_collisions / N_EPISODES * 100:.1f}%")
-    print(f"Tỉ lệ bị phá sóng: {total_jams / N_EPISODES * 100:.1f}%")
-    print(f"Tỉ lệ hết giờ: {total_timeouts / N_EPISODES * 100:.1f}%")
+    print("\n--- OVERALL EVALUATION RESULTS ---")
+    print(f"Total episodes: {args.n_episodes}")
+    if args.n_episodes > 0:
+        print(f"Capture Rate: {total_captures / args.n_episodes * 100:.1f}%")
+        print(f"Collision Rate: {total_collisions / args.n_episodes * 100:.1f}%")
+        print(f"Jammed Rate: {total_jams / args.n_episodes * 100:.1f}%")
+        print(f"Timeout Rate: {total_timeouts / args.n_episodes * 100:.1f}%")
+
+if __name__ == "__main__":
+    main()
