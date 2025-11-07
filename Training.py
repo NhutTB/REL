@@ -116,7 +116,7 @@ if __name__ == "__main__":
     ALGO = "SAC"
     TOTAL_TIMESTEPS = 5_000_000
     
-    DIFFICULTY_TO_TRAIN = "hard"
+    DIFFICULTY_TO_TRAIN = "medium"
     
     N_OBSTACLES_HARD_MODE = 6
     NUM_ENVS = 16
