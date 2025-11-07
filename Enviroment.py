@@ -418,7 +418,7 @@ class DronePursuitEnv(gym.Env):
 if __name__ == "__main__":
     print("Running environment demo...")
     
-    DIFFICULTY_TO_TEST = "hard"
+    DIFFICULTY_TO_TEST = "medium"
     
     env = DronePursuitEnv(render_mode="human", difficulty=DIFFICULTY_TO_TEST) 
     
