@@ -68,39 +68,6 @@ class RolloutCallback(BaseCallback):
             })
         return True
 
-class EpisodeStatsCallback(BaseCallback):
-    def __init__(self):
-        super().__init__()
-        self.episode_count = 0
-        self.captures = 0
-        self.collisions = 0
-        self.jammeds = 0
-        self.timeouts = 0
-
-    def _on_step(self):
-        infos = self.locals.get("infos", [])
-        for info in infos:
-            if "episode" in info:
-                self.episode_count += 1
-                final_info = info.get("final_info", {})
-                
-                if final_info.get("captured"):
-                    self.captures += 1
-                elif final_info.get("collision"):
-                    self.collisions += 1
-                elif final_info.get("jammed"):
-                    self.jammeds += 1
-                else:
-                    self.timeouts += 1
-
-        if self.episode_count > 0 and self.episode_count % 50 == 0:
-            wandb.log({
-                "stats/capture_rate": self.captures / self.episode_count,
-                "stats/collision_rate": self.collisions / self.episode_count,
-                "stats/jammed_rate": self.jammeds / self.episode_count,
-                "stats/timeout_rate": self.timeouts / self.episode_count,
-            })
-        return True
 
 def make_env(difficulty="hard", n_obstacles_hard=6, seed=0, rank=0):
     def _init():
@@ -154,7 +121,6 @@ if __name__ == "__main__":
         name_prefix=f"{ALGO}_drone"
     )
     wandb_callback = WandbCallback(gradient_save_freq=10000, model_save_path=f"models/wandb/{run.id}", verbose=2)
-    stats_callback = EpisodeStatsCallback()
     rollout_callback = RolloutCallback(eval_freq=max(50_000 // NUM_ENVS, 1), 
                                      difficulty=DIFFICULTY_TO_TRAIN,
                                      n_obstacles_hard=N_OBSTACLES_HARD_MODE)
@@ -188,7 +154,7 @@ if __name__ == "__main__":
     print(f"Track progress at: {run.url}")
     model.learn(
         total_timesteps=TOTAL_TIMESTEPS,
-        callback=[checkpoint_callback, wandb_callback, stats_callback, rollout_callback]
+        callback=[checkpoint_callback, wandb_callback, rollout_callback]
     )
 
     os.makedirs(f"models/{RUN_NAME}", exist_ok=True)
@@ -198,4 +164,5 @@ if __name__ == "__main__":
     print(f"VecNormalize stats saved at: models/{RUN_NAME}/vecnormalize.pkl")
 
     env.close()
+
     run.finish()
